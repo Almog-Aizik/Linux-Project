@@ -3,6 +3,9 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <sys/shm.h>
+#include <sys/stat.h> 
+#include <sqlite3.h> 
 
 using namespace std;
 
@@ -26,10 +29,13 @@ int main()
     int clientSocket = accept(TCPServer, nullptr, nullptr);
 
     char buffer[100] = {0};
+    while(buffer[0] != 'e' && buffer[1] != 'x' && buffer[2] != 'i' && buffer[4] != 't')
+    {
+    memset(buffer, 0, 100);
     recv(clientSocket, buffer, sizeof(buffer), 0);
     cout << "Message from client: " << buffer << endl;
+    }
 
     close(TCPServer);
-
     return 0;
 }
