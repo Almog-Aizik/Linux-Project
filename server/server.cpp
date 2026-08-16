@@ -1,19 +1,22 @@
 #define _POSIX_C_SOURCE 200809L
-
 #include "shared_defs.h"
-#include <errno.h>
+
+#include <cerrno>
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <iostream>
 #include <netinet/in.h>
 #include <pthread.h>
-#include <signal.h>
 #include <sqlite3.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/shm.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
+
+using namespace std;
 
 #define CONNECTIONS 5
 
@@ -26,6 +29,7 @@ typedef struct
 volatile sig_atomic_t sig_update = 0;
 volatile sig_atomic_t sig_shutdown = 0;
 pthread_mutex_t thread_mutex;
+atomic_int active_threads = 0;
 
 void handle_sigusr1(int sig);
 void handle_sigusr2(int sig);
@@ -69,7 +73,8 @@ int listen_function(int TCPServer, SharedBuffer *sBuff)
     error = sqlite3_open("test.db", &db);
     if (error)
     {
-        fprintf(stderr, "Failed to open DB: %s\n", sqlite3_errmsg(db));
+        cout << "Failed to open DB" << endl;
+        return -1;
     }
 
     // keep listening until shut down
@@ -127,6 +132,7 @@ int listen_function(int TCPServer, SharedBuffer *sBuff)
  */
 void *client_handler(void *arg)
 {
+    struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
     ClientContext *ctx = (ClientContext *) arg;
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
@@ -134,10 +140,11 @@ void *client_handler(void *arg)
     time_t start = 0, stop;
     int clientSocket = ctx->Socket, check, price, x_cord, y_cord;
     long elapsed; // 64 bits returned so avoiding int
-    char buffer[100], user[50], city[MAX_NAME_SIZE], update = 0;
+    char buffer[100], user[50], update = 0;
+    string city;
     const char *sql2, *last_act, *temp;
-    const char *sql = "SELECT action, unixepoch(time) FROM Log "
-                      "WHERE action IS NOT 'Error' AND action IS NOT 'Info' AND name = ? "
+    const char *sql = "SELECT action, strftime('%s', time) FROM Log "
+                      "WHERE action != 'Error' AND action != 'Info' AND name = ? "
                       "ORDER BY Time DESC "
                       "LIMIT 1";
     const char *sql3 = "INSERT INTO Log(Name, Action, Price) VALUES (?, ?, ?);";
@@ -145,13 +152,15 @@ void *client_handler(void *arg)
     check = sqlite3_open("test.db", &db);
     if (check)
     {
-        printf("Thread failed to open DB\n");
+        cout << "Thread failed to open DB" << endl;
         close(clientSocket);
         free(ctx);
         return NULL;
     }
 
     log_event(db, sBuff, "Connection recieved, thread started", "Info");
+    setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    active_threads++;
 
     while (!sig_shutdown)
     {
@@ -161,20 +170,17 @@ void *client_handler(void *arg)
 
         if (bytesReceived < 0)
         {
-            if (errno == EINTR)
-                continue; // Ignore signal interrupts
-            perror("recv error");
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+            {
+                // Ignore signal interrupts
+                // And wake up every second
+                continue;
+            }
             break;
         }
         if (bytesReceived == 0)
         {
             log_event(db, sBuff, "Client disconnected", "Info");
-            break;
-        }
-
-        if (strncmp(buffer, "exit", 4) == 0)
-        {
-            printf("Exit command received from client.\n");
             break;
         }
 
@@ -188,8 +194,9 @@ void *client_handler(void *arg)
             sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
             if (stmt == NULL)
             {
-                printf("error preparing statement");
-                break;
+                cout << "Error preparing statement" << endl;
+                log_event(db, sBuff, "Error preparing statement", "Error");
+                continue;
             }
             lock_mutex(db, sBuff);
             sqlite3_bind_text(stmt, 1, user, -1, SQLITE_TRANSIENT);
@@ -219,7 +226,7 @@ void *client_handler(void *arg)
             //-------client stopping--------
             // reminder, last_act is the last action client took
             // not current action he's taking
-            else if (strncmp(last_act, "start", 4) == 0)
+            else if (strncmp(last_act, "start", 5) == 0)
             {
                 sqlite3_finalize(stmt);
                 stmt = NULL;
@@ -233,7 +240,7 @@ void *client_handler(void *arg)
                     if (x_cord == sBuff->x_cord && y_cord == sBuff->y_cord)
                     {
                         lock_mutex(db, sBuff);
-                        snprintf(city, sizeof(city), "%s", sBuff->city);
+                        city = sBuff->city;
                         price = sBuff->price;
                         pthread_mutex_unlock(&sBuff->lock);
                         update = 1;
@@ -268,7 +275,10 @@ void *client_handler(void *arg)
                         {
                             price = sqlite3_column_int(stmt, 0);
                             temp = (const char *) sqlite3_column_text(stmt, 1);
-                            snprintf(city, sizeof(city), "%s", temp);
+                            if (temp != nullptr)
+                                city = temp;
+                            else
+                                city = "null";
                         }
                         price = price * elapsed;
 
@@ -280,7 +290,7 @@ void *client_handler(void *arg)
                         if (check == SQLITE_OK)
                         {
                             sqlite3_bind_text(stmt, 1, user, -1, SQLITE_TRANSIENT);
-                            sqlite3_bind_text(stmt, 3, city, -1, SQLITE_TRANSIENT);
+                            sqlite3_bind_text(stmt, 3, city.c_str(), -1, SQLITE_TRANSIENT);
                             sqlite3_bind_int(stmt, 2, price);
 
                             lock_mutex(db, sBuff);
@@ -358,6 +368,7 @@ void *client_handler(void *arg)
     sqlite3_close(db);
     close(clientSocket);
     free(ctx);
+    active_threads--;
     return NULL;
 }
 
@@ -373,14 +384,13 @@ int main()
     struct sockaddr_in serverAddress;
     int error, check, shmid;
     sqlite3 *db;
-    sqlite3_stmt *stmt = NULL;
     char creator = 0;
     struct sigaction sa1 = {0}, sa2 = {0};
 
     check = sqlite3_open("test.db", &db);
     if (check != SQLITE_OK)
     {
-        printf("Cannot open database\n");
+        cout << "Cannot open database" << endl;
         sqlite3_close(db);
         return 1;
     }
@@ -408,20 +418,20 @@ int main()
         shmid = shmget((key_t) SHM_KEY, sizeof(SharedBuffer), 0666);
         if (shmid == -1)
         {
-            printf("shmget attach failed");
+            cout << "shmget attach failed" << endl;
             return 1;
         }
     }
     else
     {
-        printf("shmget failed");
+        cout << "shmget failed" << endl;
         return 1;
     }
 
     SharedBuffer *sBuff = (SharedBuffer *) shmat(shmid, NULL, 0);
     if (sBuff == (void *) -1)
     {
-        perror("shmat failed");
+        cout << "shmat failed" << endl;
         return 1;
     }
 
@@ -430,6 +440,8 @@ int main()
     // make sure that shared memory is defined properly if the process started it
     if (creator)
     {
+        sBuff->init = 0;
+
         pthread_mutexattr_t attr;
         pthread_mutexattr_init(&attr);
         pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
@@ -438,17 +450,15 @@ int main()
         pthread_mutex_init(&sBuff->lock, &attr);
         pthread_mutexattr_destroy(&attr);
 
-        lock_mutex(db, sBuff);
+        pthread_mutex_lock(&sBuff->lock);
         sBuff->x_cord = 0;
         sBuff->y_cord = 0;
         sBuff->action = none;
         sBuff->price = 0;
         sBuff->listener_pid = 0;
+        sBuff->init = 1;
         pthread_mutex_unlock(&sBuff->lock);
     }
-    lock_mutex(db, sBuff);
-    sBuff->last = 0;
-    pthread_mutex_unlock(&sBuff->lock);
 
     sqlite3_exec(db, "PRAGMA journal_mode = WAL;", 0, 0, NULL); // shared memory mode
 
@@ -458,7 +468,7 @@ int main()
     int TCPServer = socket(AF_INET, SOCK_STREAM, 0);
     if (TCPServer < 0)
     {
-        perror("Socket creation failed");
+        cout << "Socket creation failed" << endl;
         sqlite3_close(db);
         shmdt(sBuff);
         exit(EXIT_FAILURE);
@@ -479,6 +489,7 @@ int main()
         log_event(db, sBuff, "Server address bind failed", "Error");
         close(TCPServer);
         sqlite3_close(db);
+        pthread_mutex_destroy(&thread_mutex);
         shmdt(sBuff);
         return 1;
     }
@@ -487,23 +498,23 @@ int main()
 
     log_event(db, sBuff, "Server stopped", "Info");
 
+    while (active_threads > 0)
+    {
+        usleep(10000); // Check every 10ms
+    }
+
     lock_mutex(db, sBuff);
     sBuff->listener_pid = 0;
     pthread_mutex_unlock(&sBuff->lock);
     close(TCPServer);
 
-    lock_mutex(db, sBuff);
-    if (sBuff->last)
+    if (creator)
     {
-        pthread_mutex_unlock(&sBuff->lock);
-        pthread_mutex_destroy(&sBuff->lock);
-    }
-    else
-    {
-        sBuff->last = 1;
-        pthread_mutex_unlock(&sBuff->lock);
+        shmctl(shmid, IPC_RMID, NULL);
+        cout << "destroyed shared memory" << endl;
     }
     sqlite3_close(db);
     shmdt(sBuff);
+    pthread_mutex_destroy(&thread_mutex);
     return 0;
 }

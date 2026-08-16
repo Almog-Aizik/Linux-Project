@@ -1,6 +1,24 @@
 #ifndef SHARED_DEFS_H
 #define SHARED_DEFS_H
 
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <sqlite3.h>
+#include <stdio.h>
+#include <sys/types.h>
+#include <unistd.h> // Provides usleep()
+
+#ifdef __cplusplus
+// C++ Compilation
+#include <atomic>
+typedef std::atomic<int> atomic_int;
+#else
+// C Compilation
+#include <stdatomic.h>
+#endif
+
 #define SHM_KEY 0x54321
 #define MAX_NAME_SIZE 20
 
@@ -18,7 +36,8 @@ typedef struct
     pid_t listener_pid;
     int price, x_cord, y_cord;
     ActionType action;
-    char city[MAX_NAME_SIZE], last;
+    char city[MAX_NAME_SIZE];
+    atomic_int init;
 } SharedBuffer;
 
 void lock_mutex(sqlite3 *db, SharedBuffer *sBuff);

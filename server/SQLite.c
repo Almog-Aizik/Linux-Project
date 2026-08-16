@@ -9,18 +9,24 @@
 #include <signal.h>
 #include <sqlite3.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/shm.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 int select_action(sqlite3 *db, SharedBuffer *sBuff);
 int update_insert_city(sqlite3 *db, SharedBuffer *sBuff);
 void clear_stdin(void);
-int get_info(sqlite3 *db);
+int get_info(sqlite3 *db, SharedBuffer *sBuff);
 int delete_city(sqlite3 *db, SharedBuffer *sBuff);
 void Server_shutdown(sqlite3 *db, SharedBuffer *sBuff);
+void server_start(sqlite3 *db, SharedBuffer *sBuff);
 int import_cities(sqlite3 *db, SharedBuffer *sBuff);
+int get_city_info(sqlite3 *db);
+int get_trans(sqlite3 *db);
+int get_log(sqlite3 *db);
 
 /**
  * @brief
@@ -46,24 +52,31 @@ void clear_stdin(void)
  */
 int select_action(sqlite3 *db, SharedBuffer *sBuff)
 {
-    int selection;
+    int selection, check;
+    system("clear");
     printf("\nselect action:\n"
            "1. Query database\n"
            "2. Update or add entry\n"
            "3. Delete entry\n"
            "4. Import from cities.txt\n"
-           "5. Shutdown the server\n"
+           "5. Start server\n"
+           "6. Shutdown the server\n"
            "any other number will exit.\n");
-    while (scanf("%d", &selection) != 1)
+    check = scanf("%d", &selection);
+    while (check != 1)
     {
+        if (check == -1)
+            // check for end of stream
+            return -1;
         printf("Invalid input!\n");
         clear_stdin();
+        check = scanf("%d", &selection);
     }
     clear_stdin();
     switch (selection)
     {
     case 1:
-        get_info(db);
+        get_info(db, sBuff);
         break;
     case 2:
         update_insert_city(db, sBuff);
@@ -75,7 +88,47 @@ int select_action(sqlite3 *db, SharedBuffer *sBuff)
         import_cities(db, sBuff);
         break;
     case 5:
+        server_start(db, sBuff);
+        break;
+    case 6:
         Server_shutdown(db, sBuff);
+        break;
+    default:
+        return -1;
+    }
+    return 0;
+}
+
+int get_info(sqlite3 *db, SharedBuffer *sBuff)
+{
+    int selection, check;
+    system("clear");
+    printf("\nselect what to quary:\n"
+           "1. Get city info\n"
+           "2. Get transactions\n"
+           "3. Get log\n"
+           "any other number will exit.\n");
+    check = scanf("%d", &selection);
+    while (check != 1)
+    {
+        if (check == -1)
+            // check for end of stream
+            return -1;
+        printf("Invalid input!\n");
+        clear_stdin();
+        check = scanf("%d", &selection);
+    }
+    clear_stdin();
+    switch (selection)
+    {
+    case 1:
+        get_city_info(db);
+        break;
+    case 2:
+        get_trans(db);
+        break;
+    case 3:
+        get_log(db);
         break;
     default:
         return -1;
@@ -106,6 +159,7 @@ int update_insert_city(sqlite3 *db, SharedBuffer *sBuff)
     sql2 = "INSERT INTO cities (Name, x_cord, y_cord, Price) VALUES (?, ?, ?, ?)";
     sql3 = "UPDATE cities SET Price = ? WHERE name = ?;";
 
+    system("clear");
     printf("\nSelect location name\n");
     fgets(input, MAX_NAME_SIZE, stdin);
     size_t len = strlen(input);
@@ -222,14 +276,15 @@ int update_insert_city(sqlite3 *db, SharedBuffer *sBuff)
     sBuff->y_cord = y_cord;
     sBuff->price = price;
     sBuff->action = update;
-    pthread_mutex_unlock(&sBuff->lock);
-    stmt = NULL;
-
     if (sBuff->listener_pid > 0)
     {
         kill(sBuff->listener_pid, SIGUSR1);
     }
+    pthread_mutex_unlock(&sBuff->lock);
+    stmt = NULL;
 
+    printf("Press any key to continue");
+    getchar();
     return 0;
 }
 
@@ -242,17 +297,52 @@ int update_insert_city(sqlite3 *db, SharedBuffer *sBuff)
  * @return int
  * exit code
  */
-int get_info(sqlite3 *db)
+int get_city_info(sqlite3 *db)
 {
     sqlite3_stmt *stmt = NULL;
-    const char *sql;
+    const char *sql, *sql2;
     unsigned const char *name;
     char pattern[MAX_NAME_SIZE + 4] = {0}, input[MAX_NAME_SIZE] = {0};
-    int check, x_cord, y_cord, price;
+    int check, x_cord, y_cord, price, found = 0;
 
-    sql = "SELECT Name, x_cord, y_cord, COALESCE(Price, 0) "
-          "FROM cities WHERE Name LIKE ? LIMIT 1";
+    sql = "SELECT Name FROM cities";
 
+    sql2 = "SELECT Name, x_cord, y_cord, COALESCE(Price, 0) "
+           "FROM cities WHERE Name LIKE ? LIMIT 1";
+
+    // get list of cities available
+    system("clear");
+    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (stmt == NULL)
+    {
+        printf("error binding Database");
+        return -1;
+    }
+    check = sqlite3_step(stmt);
+    while (check == SQLITE_ROW)
+    {
+        if (found == 0)
+        {
+            printf("Cities available: ");
+            found = 1;
+        }
+
+        name = sqlite3_column_text(stmt, 0);
+
+        printf("%s, ", name);
+        check = sqlite3_step(stmt);
+    }
+    if (found == 0)
+    {
+        printf("No cities found.\n");
+        sqlite3_finalize(stmt);
+        stmt = NULL;
+        return -1;
+    }
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+
+    // select city
     printf("\nselect location name:\n");
     fgets(input, MAX_NAME_SIZE, stdin);
     size_t len = strlen(input);
@@ -262,7 +352,7 @@ int get_info(sqlite3 *db)
     }
     snprintf(pattern, sizeof(pattern), "%%%s%%", input);
 
-    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    sqlite3_prepare_v2(db, sql2, -1, &stmt, NULL);
     if (stmt == NULL)
     {
         printf("error binding Database");
@@ -279,13 +369,136 @@ int get_info(sqlite3 *db)
         printf("Name | X coordinate | Y coordinate | Price\n");
         printf("%s | %d | %d | %d\n", name, x_cord, y_cord, price);
     }
-    else
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+    printf("Press any key to continue");
+    getchar();
+    return 0;
+}
+
+/**
+ * @brief
+ * get the last 200 entries in the transaction log
+ *
+ * @param db
+ * database to look up from
+ * @return int
+ * return code
+ */
+int get_trans(sqlite3 *db)
+{
+    sqlite3_stmt *stmt = NULL;
+    const char *sql;
+    unsigned const char *name, *location, *time;
+    int check, pay, found = 0;
+
+    sql = "SELECT * FROM ( "
+          "SELECT DATETIME(time, 'localtime') AS local_time , Name, location, pay "
+          "FROM customers "
+          "ORDER BY time DESC "
+          "limit 200 "
+          ") ORDER BY local_time ASC";
+
+    // get list of cities available
+    system("clear");
+    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (stmt == NULL)
     {
-        printf("No match found.\n");
+        printf("error binding Database");
+        return -1;
+    }
+    check = sqlite3_step(stmt);
+    while (check == SQLITE_ROW)
+    {
+        if (found == 0)
+        {
+            printf("log:\n"
+                   "Time | Identifier | Location | payment\n");
+            found = 1;
+        }
+
+        time = sqlite3_column_text(stmt, 0);
+        name = sqlite3_column_text(stmt, 1);
+        location = sqlite3_column_text(stmt, 2);
+        pay = sqlite3_column_int(stmt, 3);
+
+        printf("%s | %s | %s | %d\n", time, name, location, pay);
+        check = sqlite3_step(stmt);
+    }
+    if (found == 0)
+    {
+        printf("No transactions happened.\n");
+        sqlite3_finalize(stmt);
+        stmt = NULL;
+        return -1;
     }
     sqlite3_finalize(stmt);
     stmt = NULL;
+    printf("Press any key to continue");
+    getchar();
+    return 0;
+}
 
+/**
+ * @brief
+ * Get the last 200 entries in the log
+ *
+ * @param db
+ * database to search
+ * @return int
+ * return code
+ */
+int get_log(sqlite3 *db)
+{
+    sqlite3_stmt *stmt = NULL;
+    const char *sql;
+    unsigned const char *name, *type, *time;
+    int check, pay, found = 0;
+
+    sql = "SELECT * FROM ("
+          "SELECT DATETIME(time, 'localtime') AS local_time, Name, action, price "
+          "FROM Log "
+          "ORDER BY time DESC "
+          "LIMIT 200 "
+          ") ORDER BY local_time ASC";
+
+    // get list of cities available
+    system("clear");
+    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (stmt == NULL)
+    {
+        printf("error binding Database");
+        return -1;
+    }
+    check = sqlite3_step(stmt);
+    while (check == SQLITE_ROW)
+    {
+        if (found == 0)
+        {
+            printf("log:\n"
+                   "Time | Identifier | type | payment\n");
+            found = 1;
+        }
+
+        time = sqlite3_column_text(stmt, 0);
+        name = sqlite3_column_text(stmt, 1);
+        type = sqlite3_column_text(stmt, 2);
+        pay = sqlite3_column_int(stmt, 3);
+
+        printf("%s | %s | %s | %d\n", time, name, type, pay);
+        check = sqlite3_step(stmt);
+    }
+    if (found == 0)
+    {
+        printf("No transactions happened.\n");
+        sqlite3_finalize(stmt);
+        stmt = NULL;
+        return -1;
+    }
+    sqlite3_finalize(stmt);
+    stmt = NULL;
+    printf("Press any key to continue");
+    getchar();
     return 0;
 }
 
@@ -310,6 +523,7 @@ int delete_city(sqlite3 *db, SharedBuffer *sBuff)
     char pattern[MAX_NAME_SIZE + 4] = {0}, input[MAX_NAME_SIZE] = {0}, verify = 0, matched_city[MAX_NAME_SIZE] = {0};
     int check, x_cord, y_cord;
 
+    system("clear");
     printf("\nselect location\n");
     fgets(input, MAX_NAME_SIZE, stdin);
     len = strlen(input);
@@ -357,17 +571,16 @@ int delete_city(sqlite3 *db, SharedBuffer *sBuff)
                 sBuff->y_cord = y_cord;
                 sBuff->price = 0;
                 sBuff->action = deleted;
-
+                if (sBuff->listener_pid > 0)
+                {
+                    kill(sBuff->listener_pid, SIGUSR1);
+                }
                 pthread_mutex_unlock(&sBuff->lock);
                 printf("Entry deleted\n");
             }
             else
             {
                 printf("Error: could not delete\n");
-            }
-            if (sBuff->listener_pid > 0)
-            {
-                kill(sBuff->listener_pid, SIGUSR1);
             }
         }
     }
@@ -390,10 +603,11 @@ int delete_city(sqlite3 *db, SharedBuffer *sBuff)
  */
 void Server_shutdown(sqlite3 *db, SharedBuffer *sBuff)
 {
+    system("clear");
     const char *sql;
+    lock_mutex(db, sBuff);
     if (sBuff->listener_pid > 0)
     {
-        lock_mutex(db, sBuff);
         sBuff->action = off;
         pthread_mutex_unlock(&sBuff->lock);
         kill(sBuff->listener_pid, SIGUSR2);
@@ -401,7 +615,49 @@ void Server_shutdown(sqlite3 *db, SharedBuffer *sBuff)
     }
     else
     {
+        pthread_mutex_unlock(&sBuff->lock);
         log_event(db, sBuff, "Server not found", "Error");
+    }
+}
+
+/**
+ * @brief
+ * starts the server
+ *
+ * @param db
+ * database for logging
+ * @param sBuff
+ * shared memory for syncing
+ */
+void server_start(sqlite3 *db, SharedBuffer *sBuff)
+{
+    pid_t pid = fork();
+
+    if (pid < 0)
+    {
+        // fork failed
+        printf("fork failed\n");
+        log_event(db, sBuff, "fork failed", "Error");
+    }
+    else if (pid == 0)
+    {
+        // child process
+        // Replace child process with server
+        char *argv[] = {NULL};
+        char *envp[] = {NULL};
+
+        execve("./server", argv, envp);
+
+        // runs only if it failed
+        printf("Server couldn't start\n");
+        log_event(db, sBuff, "Server couldn't start", "Error");
+        exit(EXIT_FAILURE);
+    }
+    else
+    {
+        // parent process
+        printf("Server started\n");
+        log_event(db, sBuff, "Server started", "Info");
     }
 }
 
@@ -496,6 +752,8 @@ int import_cities(sqlite3 *db, SharedBuffer *sBuff)
         printf("%d lines were skipped\n", error);
     log_event(db, sBuff, "Cities imported from file", "Info");
     fclose(file);
+    printf("Press any key to continue");
+    getchar();
     return 0;
 }
 
@@ -552,6 +810,7 @@ int main(void)
     // make sure that shared memory is defined properly if the process started it
     if (creator)
     {
+        sBuff->init = 0;
         pthread_mutexattr_t attr;
         pthread_mutexattr_init(&attr);
         pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
@@ -560,14 +819,14 @@ int main(void)
         pthread_mutex_init(&sBuff->lock, &attr);
         pthread_mutexattr_destroy(&attr);
 
-        lock_mutex(db, sBuff);
+        pthread_mutex_lock(&sBuff->lock);
         memset(sBuff->city, 0, MAX_NAME_SIZE);
         sBuff->x_cord = 0;
         sBuff->y_cord = 0;
         sBuff->action = none;
         sBuff->listener_pid = 0;
         sBuff->price = 0;
-        sBuff->last = 0;
+        sBuff->init = 1;
         pthread_mutex_unlock(&sBuff->lock);
     }
 
@@ -575,14 +834,12 @@ int main(void)
 
     if (check != SQLITE_OK)
     {
-        fprintf(stderr, "Cannot open database: %s\n", sqlite3_errmsg(db));
+        printf("Cannot open database\n");
         sqlite3_close(db);
         return 1;
     }
 
     lock_mutex(db, sBuff);
-    sBuff->last = 0;
-
     sqlite3_exec(db, "PRAGMA journal_mode = WAL;", 0, 0, NULL); // shared memory mode
 
     // create all relavent tables
@@ -600,17 +857,6 @@ int main(void)
     {
         shmctl(shmid, IPC_RMID, NULL);
         printf("destroyed shared memory");
-    }
-    lock_mutex(db, sBuff);
-    if (sBuff->last)
-    {
-        pthread_mutex_unlock(&sBuff->lock);
-        pthread_mutex_destroy(&sBuff->lock);
-    }
-    else
-    {
-        sBuff->last = 1;
-        pthread_mutex_unlock(&sBuff->lock);
     }
     sqlite3_close(db);
     shmdt(sBuff);

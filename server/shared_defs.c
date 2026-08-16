@@ -1,21 +1,29 @@
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
 
 #include "shared_defs.h"
 
 #include <errno.h>
 #include <pthread.h>
 #include <sqlite3.h>
+#include <stdio.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 void lock_mutex(sqlite3 *db, SharedBuffer *sBuff)
 {
     int check;
+    while (sBuff->init != 1)
+    {
+        sched_yield(); // yield the process if the mutex haven't been initialized yet
+        usleep(1000);  // wait 1ms before trying again
+    }
     check = pthread_mutex_lock(&sBuff->lock);
     if (check == EOWNERDEAD)
     {
         pthread_mutex_consistent(&sBuff->lock);
         printf("Server crashed!");
-        log_event(db, sBuff, "Mutex creator not running, recovering mutex", "Error");
+        log_event(db, sBuff, "Mutex stopped mid-operation, recovering mutex", "Error");
     }
 }
 
@@ -35,9 +43,7 @@ void log_event(sqlite3 *db, SharedBuffer *sBuff, const char *name, const char *a
         sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 2, action, -1, SQLITE_TRANSIENT);
 
-        pthread_mutex_lock(&sBuff->lock);
         sqlite3_step(stmt);
-        pthread_mutex_unlock(&sBuff->lock);
 
         sqlite3_finalize(stmt);
         stmt = NULL;
