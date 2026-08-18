@@ -735,12 +735,12 @@ int import_cities(sqlite3 *db, SharedBuffer *sBuff)
             if (check != SQLITE_DONE)
             {
                 printf("Insert failed");
-                log_event(db, sBuff, "Insert failed", "Error");
+                log_event(db, sBuff, "Insert failed\n", "Error");
             }
         }
         else
         {
-            log_event(db, sBuff, "Failed to parse line", "Error");
+            log_event(db, sBuff, "Failed to parse line\n", "Error");
             error++;
         }
         verify = fgets(line, sizeof(line), file);
@@ -856,7 +856,7 @@ int main(void)
     if (creator)
     {
         shmctl(shmid, IPC_RMID, NULL);
-        printf("destroyed shared memory");
+        printf("destroyed shared memory\n");
     }
     sqlite3_close(db);
     shmdt(sBuff);
