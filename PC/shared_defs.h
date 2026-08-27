@@ -19,7 +19,6 @@ typedef std::atomic<int> atomic_int;
 #include <stdatomic.h>
 #endif
 
-#define SHM_KEY 0x54321
 #define MAX_NAME_SIZE 20
 
 typedef enum

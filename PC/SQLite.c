@@ -27,6 +27,74 @@ int import_cities(sqlite3 *db, SharedBuffer *sBuff);
 int get_city_info(sqlite3 *db);
 int get_trans(sqlite3 *db);
 int get_log(sqlite3 *db);
+void save_config(const char *path);
+void load_config(const char *path);
+
+typedef struct
+{
+    char db_path[256];
+    char server_path[256];
+    char import_path[256];
+    int shared_key;
+} ServerConfig;
+
+ServerConfig config = {
+    .db_path = "test.db", .server_path = "server", .import_path = "cities.txt", .shared_key = 344865}; // defaults
+
+void save_config(const char *path)
+{
+    FILE *file = fopen(path, "w");
+    if (file == NULL)
+    {
+        printf("Warning: could not create config file at %s\n", path);
+        return;
+    }
+    fprintf(file, "# Server configuration\n");
+    fprintf(file, "import_path=%s\n", config.import_path);
+    fprintf(file, "server_path=%s\n", config.server_path);
+    fprintf(file, "# need to be synced\n");
+    fprintf(file, "db_path=%s\n", config.db_path);
+    fprintf(file, "shared_key=%d\n", config.shared_key);
+    fclose(file);
+}
+
+void load_config(const char *path)
+{
+    char line[256], key[64], value[192];
+    FILE *file = fopen(path, "r");
+    if (file == NULL)
+    {
+        printf("Config file not found, creating default at %s\n", path);
+        save_config(path);
+        return;
+    }
+    while (fgets(line, sizeof(line), file) != NULL)
+    {
+        if (line[0] == '\0' || line[0] == '#' || line[0] == '\n')
+            continue;
+        if (sscanf(line, "%63[^=]=%191[^\n]", key, value) != 2) // scan everything up to =
+            continue;
+
+        if (strcmp(key, "shared_key") == 0)
+            config.shared_key = atoi(value);
+        else if (strcmp(key, "db_path") == 0)
+        {
+            strncpy(config.db_path, value, sizeof(config.db_path) - 1);
+            config.db_path[sizeof(config.db_path) - 1] = '\0';
+        }
+        else if (strcmp(key, "import_path") == 0)
+        {
+            strncpy(config.import_path, value, sizeof(config.import_path) - 1);
+            config.import_path[sizeof(config.import_path) - 1] = '\0';
+        }
+        else if (strcmp(key, "server_path") == 0)
+        {
+            strncpy(config.server_path, value, sizeof(config.server_path) - 1);
+            config.server_path[sizeof(config.server_path) - 1] = '\0';
+        }
+    }
+    fclose(file);
+}
 
 /**
  * @brief
@@ -58,10 +126,11 @@ int select_action(sqlite3 *db, SharedBuffer *sBuff)
            "1. Query database\n"
            "2. Update or add entry\n"
            "3. Delete entry\n"
-           "4. Import from cities.txt\n"
+           "4. Import from %s\n"
            "5. Start server\n"
            "6. Shutdown the server\n"
-           "any other number will exit.\n");
+           "any other number will exit.\n",
+           config.import_path);
     check = scanf("%d", &selection);
     while (check != 1)
     {
@@ -631,33 +700,46 @@ void Server_shutdown(sqlite3 *db, SharedBuffer *sBuff)
  */
 void server_start(sqlite3 *db, SharedBuffer *sBuff)
 {
-    pid_t pid = fork();
-
-    if (pid < 0)
+    lock_mutex(db, sBuff);
+    pid_t check = sBuff->listener_pid;
+    pthread_mutex_unlock(&sBuff->lock);
+    if (check == 0)
     {
-        // fork failed
-        printf("fork failed\n");
-        log_event(db, sBuff, "fork failed", "Error");
-    }
-    else if (pid == 0)
-    {
-        // child process
-        // Replace child process with server
-        char *argv[] = {NULL};
-        char *envp[] = {NULL};
+        pid_t pid = fork();
 
-        execve("./server", argv, envp);
+        if (pid < 0)
+        {
+            // fork failed
+            printf("fork failed\n");
+            log_event(db, sBuff, "fork failed", "Error");
+        }
+        else if (pid == 0)
+        {
+            // child process
+            // Replace child process with server
+            char *argv[] = {config.server_path, NULL}; // new posix compatability
+            char *envp[] = {NULL};
 
-        // runs only if it failed
-        printf("Server couldn't start\n");
-        log_event(db, sBuff, "Server couldn't start", "Error");
-        exit(EXIT_FAILURE);
+            execve(config.server_path, argv, envp);
+
+            // runs only if it failed
+            printf("Server couldn't start\n");
+            log_event(db, sBuff, "Server couldn't start", "Error");
+            exit(EXIT_FAILURE);
+        }
+        else
+        {
+            // parent process
+            printf("Server started\n");
+            log_event(db, sBuff, "Server started", "Info");
+        }
     }
     else
     {
-        // parent process
-        printf("Server started\n");
-        log_event(db, sBuff, "Server started", "Info");
+        printf("Server already running\n");
+        log_event(db, sBuff, "Server start aborted, already running", "Info");
+        printf("Press any key to continue");
+        getchar();
     }
 }
 
@@ -679,7 +761,7 @@ int import_cities(sqlite3 *db, SharedBuffer *sBuff)
     char line[100], name[MAX_NAME_SIZE], *verify;
     int x_cord, y_cord, price, check, error = 0;
     sqlite3_stmt *stmt = NULL;
-    FILE *file = fopen("cities.txt", "r");
+    FILE *file = fopen(config.import_path, "r");
     if (file == NULL)
     {
         printf("Error opening file");
@@ -763,7 +845,9 @@ int main(void)
     int select = 0, check, shmid;
     char creator = 0;
     const char *sql, *sql2, *sql3;
-    shmid = shmget((key_t) SHM_KEY, sizeof(SharedBuffer), IPC_CREAT | IPC_EXCL | 0666);
+
+    load_config("sqlite.conf");
+    shmid = shmget((key_t) config.shared_key, sizeof(SharedBuffer), IPC_CREAT | IPC_EXCL | 0666);
 
     sql = "CREATE TABLE IF NOT EXISTS cities("
           "Id INTEGER PRIMARY KEY, "
@@ -787,7 +871,7 @@ int main(void)
     }
     else if (errno == EEXIST)
     {
-        shmid = shmget((key_t) SHM_KEY, sizeof(SharedBuffer), 0666);
+        shmid = shmget((key_t) config.shared_key, sizeof(SharedBuffer), 0666);
         if (shmid == -1)
         {
             perror("shmget attach failed");
@@ -830,7 +914,7 @@ int main(void)
         pthread_mutex_unlock(&sBuff->lock);
     }
 
-    check = sqlite3_open("test.db", &db);
+    check = sqlite3_open(config.db_path, &db);
 
     if (check != SQLITE_OK)
     {

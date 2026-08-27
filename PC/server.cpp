@@ -7,10 +7,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <iostream>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <sqlite3.h>
+#include <string>
 #include <sys/shm.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -18,23 +20,33 @@
 
 using namespace std;
 
-#define CONNECTIONS 5
-
 typedef struct
 {
     int Socket;
     SharedBuffer *sBuff;
 } ClientContext;
 
+struct ServerConfig
+{
+    int port = 8080;
+    int max_connections = 5;
+    char db_path[256] = "test.db";
+    int recv_timeout_sec = 1;
+    int shared_key = 344865;
+};
+
 volatile sig_atomic_t sig_update = 0;
 volatile sig_atomic_t sig_shutdown = 0;
 pthread_mutex_t thread_mutex;
 atomic_int active_threads = 0;
+struct ServerConfig config;
 
 void handle_sigusr1(int sig);
 void handle_sigusr2(int sig);
 void *client_handler(void *arg);
 int listen_function(int TCPServer, SharedBuffer *sBuff);
+void load_config(const string &path);
+void save_config(const std::string &path);
 
 /**
  * @brief
@@ -42,7 +54,7 @@ int listen_function(int TCPServer, SharedBuffer *sBuff);
  */
 void handle_sigusr1(int sig)
 {
-    sig_update = 1;
+    sig_update++;
 }
 
 /**
@@ -52,6 +64,80 @@ void handle_sigusr1(int sig)
 void handle_sigusr2(int sig)
 {
     sig_shutdown = 1;
+}
+
+/**
+ * @brief
+ * save the currently loaded config to file
+ * should only be called if no such config exists
+ *
+ * @param path
+ * the path for the config file
+ */
+void save_config(const std::string &path)
+{
+    std::ofstream file(path);
+    if (!file.is_open())
+    {
+        std::cout << "Warning: could not create config file at " << path << std::endl;
+        return;
+    }
+
+    file << "# Server configuration\n";
+    file << "port=" << config.port << "\n";
+    file << "max_connections=" << config.max_connections << "\n";
+    file << "recv_timeout_sec=" << config.recv_timeout_sec << "\n";
+    file << "# need to be synced with SQLite\n";
+    file << "shared_key=" << config.shared_key << "\n";
+    file << "db_path=" << config.db_path << "\n";
+}
+
+/**
+ * @brief
+ * loads a config file
+ * save currenly loaded to file if it's not found
+ *
+ * @param path
+ * file name
+ */
+void load_config(const string &path)
+{
+    ifstream file(path);
+    string line, key, value;
+    size_t equal;
+    if (!file.is_open())
+    {
+        cout << "Config file not found, creating default at " << path << endl;
+        save_config(path); // write defaults so the file exists next time
+        return;
+    }
+
+    while (getline(file, line))
+    {
+        if (line.empty() || line[0] == '#') // # for comments in the config file
+            continue;
+
+        equal = line.find('=');
+        if (equal == string::npos)
+            continue;
+
+        key = line.substr(0, equal);
+        value = line.substr(equal + 1);
+
+        if (key == "port")
+            config.port = stoi(value);
+        else if (key == "max_connections")
+            config.max_connections = stoi(value);
+        else if (key == "db_path")
+        {
+            strncpy(config.db_path, value.c_str(), sizeof(config.db_path) - 1);
+            config.db_path[sizeof(config.db_path) - 1] = '\0'; // guarantee null termination
+        }
+        else if (key == "recv_timeout_sec")
+            config.recv_timeout_sec = stoi(value);
+        else if (key == "shared_key")
+            config.shared_key = stoi(value);
+    }
 }
 
 /**
@@ -70,7 +156,7 @@ int listen_function(int TCPServer, SharedBuffer *sBuff)
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
 
-    error = sqlite3_open("test.db", &db);
+    error = sqlite3_open(config.db_path, &db);
     if (error)
     {
         cout << "Failed to open DB" << endl;
@@ -132,15 +218,16 @@ int listen_function(int TCPServer, SharedBuffer *sBuff)
  */
 void *client_handler(void *arg)
 {
-    struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+    struct timeval tv = {.tv_sec = config.recv_timeout_sec, .tv_usec = 0};
     ClientContext *ctx = (ClientContext *) arg;
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
     SharedBuffer *sBuff = ctx->sBuff;
     time_t start = 0, stop;
-    int clientSocket = ctx->Socket, check, price, x_cord, y_cord;
-    long elapsed; // 64 bits returned so avoiding int
-    char buffer[100], user[50], update = 0;
+    sig_atomic_t last_update = sig_update;
+    int clientSocket = ctx->Socket, check, x_cord, y_cord;
+    long elapsed, price; // 64 bits returned so avoiding int
+    char buffer[100], user[50];
     string city;
     const char *sql2, *last_act, *temp;
     const char *sql = "SELECT action, strftime('%s', time) FROM Log "
@@ -149,7 +236,7 @@ void *client_handler(void *arg)
                       "LIMIT 1";
     const char *sql3 = "INSERT INTO Log(Name, Action, Price) VALUES (?, ?, ?);";
 
-    check = sqlite3_open("test.db", &db);
+    check = sqlite3_open(config.db_path, &db);
     if (check)
     {
         cout << "Thread failed to open DB" << endl;
@@ -166,7 +253,7 @@ void *client_handler(void *arg)
     {
         memset(buffer, 0, sizeof(buffer)); // make sure all requests are saved to a clean buffer
         ssize_t bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
-        update = 0;
+        last_update = sig_update;
 
         if (bytesReceived < 0)
         {
@@ -235,7 +322,7 @@ void *client_handler(void *arg)
                 stop = time(NULL);
                 elapsed = difftime(stop, start);
                 // signal to check update recieved, handle that
-                if (sig_update)
+                if (sig_update != last_update)
                 {
                     if (x_cord == sBuff->x_cord && y_cord == sBuff->y_cord)
                     {
@@ -243,14 +330,10 @@ void *client_handler(void *arg)
                         city = sBuff->city;
                         price = sBuff->price;
                         pthread_mutex_unlock(&sBuff->lock);
-                        update = 1;
                         check = SQLITE_OK;
                     }
-                    pthread_mutex_lock(&thread_mutex);
-                    sig_update = 0;
-                    pthread_mutex_unlock(&thread_mutex);
                 }
-                if (update != 1)
+                else
                 {
                     sql2 = "SELECT COALESCE(Price, 0), Name FROM cities "
                            "WHERE x_cord = ? AND y_cord = ?;";
@@ -258,7 +341,7 @@ void *client_handler(void *arg)
                 }
                 if (check == SQLITE_OK)
                 {
-                    if (update != 1)
+                    if (sig_update == last_update)
                     {
                         sqlite3_bind_int(stmt, 1, x_cord);
                         sqlite3_bind_int(stmt, 2, y_cord);
@@ -271,7 +354,7 @@ void *client_handler(void *arg)
                     // handle the city request
                     if (check == SQLITE_ROW)
                     {
-                        if (update != 1)
+                        if (sig_update == last_update)
                         {
                             price = sqlite3_column_int(stmt, 0);
                             temp = (const char *) sqlite3_column_text(stmt, 1);
@@ -387,7 +470,9 @@ int main()
     char creator = 0;
     struct sigaction sa1 = {0}, sa2 = {0};
 
-    check = sqlite3_open("test.db", &db);
+    load_config("server.conf");
+
+    check = sqlite3_open(config.db_path, &db);
     if (check != SQLITE_OK)
     {
         cout << "Cannot open database" << endl;
@@ -408,14 +493,14 @@ int main()
     sa2.sa_flags = 0;
     sigaction(SIGUSR2, &sa2, NULL);
 
-    shmid = shmget((key_t) SHM_KEY, sizeof(SharedBuffer), IPC_CREAT | IPC_EXCL | 0666);
+    shmid = shmget((key_t) config.shared_key, sizeof(SharedBuffer), IPC_CREAT | IPC_EXCL | 0666);
     if (shmid != -1)
     {
         creator = 1;
     }
     else if (errno == EEXIST)
     {
-        shmid = shmget((key_t) SHM_KEY, sizeof(SharedBuffer), 0666);
+        shmid = shmget((key_t) config.shared_key, sizeof(SharedBuffer), 0666);
         if (shmid == -1)
         {
             cout << "shmget attach failed" << endl;
@@ -477,10 +562,10 @@ int main()
     sBuff->listener_pid = getpid();
     pthread_mutex_unlock(&sBuff->lock);
 
-    // listen to all addresses on port 8080
+    // listen to all addresses on port from the config
     memset(&serverAddress, 0, sizeof(serverAddress));
     serverAddress.sin_family = AF_INET;
-    serverAddress.sin_port = htons(8080);
+    serverAddress.sin_port = htons(config.port);
     serverAddress.sin_addr.s_addr = INADDR_ANY;
 
     error = bind(TCPServer, (struct sockaddr *) &serverAddress, sizeof(serverAddress));
@@ -493,7 +578,7 @@ int main()
         shmdt(sBuff);
         return 1;
     }
-    listen(TCPServer, CONNECTIONS);
+    listen(TCPServer, config.max_connections);
     listen_function(TCPServer, sBuff);
 
     log_event(db, sBuff, "Server stopped", "Info");
