@@ -26,7 +26,7 @@ typedef struct
     SharedBuffer *sBuff;
 } ClientContext;
 
-struct ServerConfig
+struct Config
 {
     int port = 8080;
     int max_connections = 5;
@@ -39,7 +39,7 @@ volatile sig_atomic_t sig_update = 0;
 volatile sig_atomic_t sig_shutdown = 0;
 pthread_mutex_t thread_mutex;
 atomic_int active_threads = 0;
-struct ServerConfig config;
+struct Config config;
 
 void handle_sigusr1(int sig);
 void handle_sigusr2(int sig);

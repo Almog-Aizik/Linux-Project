@@ -36,11 +36,19 @@ typedef struct
     char server_path[256];
     char import_path[256];
     int shared_key;
-} ServerConfig;
+} Config;
 
-ServerConfig config = {
+Config config = {
     .db_path = "test.db", .server_path = "server", .import_path = "cities.txt", .shared_key = 344865}; // defaults
 
+/**
+ * @brief
+ * save the currently loaded config to file
+ * should only be called if no such config exists
+ *
+ * @param path
+ * the path for the config file
+ */
 void save_config(const char *path)
 {
     FILE *file = fopen(path, "w");
@@ -49,7 +57,7 @@ void save_config(const char *path)
         printf("Warning: could not create config file at %s\n", path);
         return;
     }
-    fprintf(file, "# Server configuration\n");
+    fprintf(file, "# Server admin panel config\n");
     fprintf(file, "import_path=%s\n", config.import_path);
     fprintf(file, "server_path=%s\n", config.server_path);
     fprintf(file, "# need to be synced\n");
@@ -58,6 +66,14 @@ void save_config(const char *path)
     fclose(file);
 }
 
+/**
+ * @brief
+ * loads a config file
+ * save currenly loaded to file if it's not found
+ *
+ * @param path
+ * file name
+ */
 void load_config(const char *path)
 {
     char line[256], key[64], value[192];
