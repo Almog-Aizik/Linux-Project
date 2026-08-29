@@ -739,8 +739,24 @@ void server_start(sqlite3 *db, SharedBuffer *sBuff)
             execve(config.server_path, argv, envp);
 
             // runs only if it failed
+            sqlite3 *child_db;
+            check = sqlite3_open(config.db_path, &child_db);
+            if (check == SQLITE_OK)
+            {
+                log_event(child_db, sBuff, "Server couldn't start", "Error");
+                lock_mutex(child_db, sBuff);
+                sBuff->listener_pid = 0;
+                pthread_mutex_unlock(&sBuff->lock);
+                sqlite3_close(child_db);
+            }
+            else
+            {
+                fprintf(stderr, "Child process failed to open database for error logging\n");
+                pthread_mutex_lock(&sBuff->lock);
+                sBuff->listener_pid = 0;
+                pthread_mutex_unlock(&sBuff->lock);
+            }
             printf("Server couldn't start\n");
-            log_event(db, sBuff, "Server couldn't start", "Error");
             exit(EXIT_FAILURE);
         }
         else
